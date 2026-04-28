@@ -12,12 +12,13 @@ import re
 import pdfplumber
 import pandas as pd
 from datetime import datetime
+import time
 
 # =========================
 # CONFIG
 # =========================
 PDF_FOLDER = r"/home/spot/Downloads/Cac_cert/"       # Folder to watch
-OUTPUT_FILE = rf"./CAC REGISTERED:{datetime.now()}.xlsx"      # Excel output file
+OUTPUT_FILE = rf"./CAC_REGISTERED:{datetime.now()}.xlsx"      # Excel output file
 PROCESSED_LOG = r"./processed_files.txt"             # Tracks processed PDFs
 
 # =========================
@@ -146,21 +147,28 @@ def process_pdf(pdf_path):
     save_processed_file(filename)
 
     print(f"Done: {filename}")
+    return True
 
 # =========================
 # INITIAL BACKLOG PROCESSING
 # =========================
 def process_existing_pdfs():
+    tracker = 0
     for file in os.listdir(PDF_FOLDER):
         if file.lower().endswith(".pdf"):
-            process_pdf(os.path.join(PDF_FOLDER, file))
+            status = process_pdf(os.path.join(PDF_FOLDER, file))
+            if status is True:
+                tracker += 1
+    print(f"Total Processed: {tracker}")
 
 # =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
+    start = time.time()
     os.makedirs(PDF_FOLDER, exist_ok=True)
 
     print("Checking existing PDFs...")
     process_existing_pdfs()
-    print("Process Completed")
+    end = time.time()
+    print(f"Process Completed. Time Taken: {end - start.2f}")
