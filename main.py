@@ -1,12 +1,3 @@
-# =========================
-# PDF Folder Auto-Extractor
-# =========================
-# What it does:
-# 2. Opens each PDF
-# 3. Extracts data using regex
-# 4. Saves/appends results into Excel
-# 5. Skips already processed files
-
 import os
 import re
 import pdfplumber
@@ -14,20 +5,16 @@ import pandas as pd
 from datetime import datetime
 import time
 
-# =========================
+
 # CONFIG
-# =========================
-PDF_FOLDER = r"/home/spot/Downloads/Cac_cert/"       # Folder to watch
+PDF_FOLDER = r"/home/spot/Downloads/Cac cert/"       # Folder to watch
 OUTPUT_FILE = rf"./CAC_REGISTERED:{datetime.now()}.xlsx"      # Excel output file
 PROCESSED_LOG = r"./processed_files.txt"             # Tracks processed PDFs
 
-# =========================
 # REGEX PATTERNS
-# --------------------------
 # The PDF layout has labels and values on the SAME line, separated by spaces.
 # Pattern format:  LABEL<spaces>VALUE<end-of-line>
 # re.MULTILINE is used so $ matches end of each line.
-# =========================
 PATTERNS = {
     # Page 2 — Proprietor fields
     "SURNAME":       r"^SURNAME\s+(.+)$",
@@ -51,9 +38,7 @@ PATTERNS = {
     "Principal Business Activity": r"^Principal Business Activity\s+(.+)$",
 }
 
-# =========================
 # LOAD PROCESSED FILES
-# =========================
 def load_processed_files():
     if os.path.exists(PROCESSED_LOG):
         with open(PROCESSED_LOG, "r") as f:
@@ -64,9 +49,7 @@ def save_processed_file(filename):
     with open(PROCESSED_LOG, "a") as f:
         f.write(filename + "\n")
 
-# =========================
 # EXTRACT TEXT FROM PDF
-# =========================
 def extract_pdf_text(pdf_path):
     text = ""
     try:
@@ -78,10 +61,8 @@ def extract_pdf_text(pdf_path):
     except Exception as e:
         print(f"Error reading {pdf_path}: {e}")
     return text
-
-# =========================
+    
 # APPLY REGEX EXTRACTION
-# =========================
 def extract_data(text):
     extracted = {}
     for field, pattern in PATTERNS.items():
@@ -98,9 +79,7 @@ def extract_data(text):
         extracted[field] = None if value and value.upper() == "NIL" else value
     return extracted
 
-# =========================
 # APPEND TO EXCEL
-# =========================
 def append_to_excel(data):
     new_df = pd.DataFrame([data])
 
@@ -111,16 +90,13 @@ def append_to_excel(data):
         combined_df = new_df
 
     combined_df.to_excel(OUTPUT_FILE, index=False)
+    return OUTPUT_FILE
 
-# =========================
 # CHECKS IF STATUS REPORT
-# =========================
 def checker(filename):
     return "Status Report" in filename
 
-# =========================
 # PROCESS PDF
-# =========================
 def process_pdf(pdf_path):
     filename = os.path.basename(pdf_path)
 
@@ -143,32 +119,52 @@ def process_pdf(pdf_path):
     data = extract_data(text)
     data["Source File"] = filename
 
-    append_to_excel(data)
+    file_name = append_to_excel(data)
     save_processed_file(filename)
 
     print(f"Done: {filename}")
-    return True
+    return file_name
 
-# =========================
 # INITIAL BACKLOG PROCESSING
-# =========================
 def process_existing_pdfs():
     tracker = 0
     for file in os.listdir(PDF_FOLDER):
         if file.lower().endswith(".pdf"):
             status = process_pdf(os.path.join(PDF_FOLDER, file))
-            if status is True:
+            if status:
                 tracker += 1
     print(f"Total Processed: {tracker}")
+    return status
 
-# =========================
-# MAIN
-# =========================
+def data_processing(OUTPUT_FILE):
+    print(OUTPUT_FILE)
+
+    if os.path.exists(OUTPUT_FILE):
+        data = pd.read_excel(OUTPUT_FILE)
+
+        # Clean common extraction issues
+        if 'OTHER NAME' in data.columns:
+            data['OTHER NAME'] = (
+                data['OTHER NAME']
+                .fillna('')
+                .replace(r'EMAIL\s+NIL', '', regex=True)
+                .str.strip()
+            )
+
+        # Save cleaned file
+        data.to_excel(OUTPUT_FILE, index=False)
+
+        print("Data cleaned successfully.")
+
+    else:
+        print("An Error Occurred During Data Processing")
+
 if __name__ == "__main__":
     start = time.time()
     os.makedirs(PDF_FOLDER, exist_ok=True)
 
     print("Checking existing PDFs...")
-    process_existing_pdfs()
+    file = process_existing_pdfs()
+    data_processing(file)
     end = time.time()
-    print(f"Process Completed. Time Taken: {end - start.2f}")
+    print(f"Process Completed. Time Taken: {end - start:.2f} seconds")
