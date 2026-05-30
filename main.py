@@ -7,7 +7,7 @@ import time
 
 
 # CONFIG
-PDF_FOLDER = r"/home/spot/Downloads/Cac cert/"       # Folder to watch
+PDF_FOLDER = r"/home/spot/Downloads/Queried recovered/"       # Folder to watch
 OUTPUT_FILE = rf"./CAC_REGISTERED:{datetime.now()}.xlsx"      # Excel output file
 PROCESSED_LOG = r"./processed_files.txt"             # Tracks processed PDFs
 
@@ -128,16 +128,19 @@ def process_pdf(pdf_path):
 # INITIAL BACKLOG PROCESSING
 def process_existing_pdfs():
     tracker = 0
+    output_file = None
     for file in os.listdir(PDF_FOLDER):
         if file.lower().endswith(".pdf"):
-            status = process_pdf(os.path.join(PDF_FOLDER, file))
-            if status:
+            result = process_pdf(os.path.join(PDF_FOLDER, file))
+            if result:
                 tracker += 1
+                output_file = result  # keep updating — all writes go to same file
     print(f"Total Processed: {tracker}")
-    return status
+    return output_file
 
-def data_processing(OUTPUT_FILE):
-    print(OUTPUT_FILE)
+def data_processing(file):
+    print(file)
+    OUTPUT_FILE = file
 
     if os.path.exists(OUTPUT_FILE):
         data = pd.read_excel(OUTPUT_FILE)
@@ -165,6 +168,9 @@ if __name__ == "__main__":
 
     print("Checking existing PDFs...")
     file = process_existing_pdfs()
-    data_processing(file)
+    if file:
+        data_processing(file)
+    else:
+        print("No Status Reports were processed — skipping data cleaning.")
     end = time.time()
     print(f"Process Completed. Time Taken: {end - start:.2f} seconds")
