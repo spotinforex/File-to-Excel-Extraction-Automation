@@ -1,176 +1,208 @@
 import os
 import re
-import pdfplumber
-import pandas as pd
-from datetime import datetime
 import time
+from datetime import datetime
 
+import pandas as pd
+import pdfplumber
 
 # CONFIG
-PDF_FOLDER = r"/home/spot/Downloads/Queried recovered/"       # Folder to watch
-OUTPUT_FILE = rf"./CAC_REGISTERED:{datetime.now()}.xlsx"      # Excel output file
-PROCESSED_LOG = r"./processed_files.txt"             # Tracks processed PDFs
+PDF_FOLDER = r"C:\Users\VOSTRO 3590\Documents\MCIPP\cac_downloads\status_reports"
+OUTPUT_FILE = f'CAC_REGISTERED_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.xlsx'
+PROCESSED_LOG = r"processed_files.txt"
 
-# REGEX PATTERNS
-# The PDF layout has labels and values on the SAME line, separated by spaces.
-# Pattern format:  LABEL<spaces>VALUE<end-of-line>
-# re.MULTILINE is used so $ matches end of each line.
-PATTERNS = {
-    # Page 2 — Proprietor fields
-    "SURNAME":       r"^SURNAME\s+(.+)$",
-    "FIRSTNAME":     r"^FIRSTNAME\s+(.+)$",
-    "OTHER NAME":    r"^OTHER NAME\s+(.+)$",
-    "EMAIL":         r"^EMAIL\s+(.+)$",
-    "PHONE NUMBER":  r"^PHONE NUMBER\s+(.+)$",
-    "GENDER":        r"^GENDER\s+(.+)$",
-    "DATE OF BIRTH": r"^DATE OF BIRTH\s+(.+)$",
-    "STATUS":        r"^STATUS\s+(ACTIVE|INACTIVE|STRUCK OFF)$",
+# Layout settings (fractions/points of the PDF page)
+SPLIT_RATIO = 0.33   # words starting left of this x (as a fraction of page width) are labels
+MAX_DIST = 16        # max vertical distance (pt) between a value line and its label
+LINE_TOL = 3         # words whose tops differ by <= this are on the same line
 
-    # Page 1 — Business fields
-    # "Business Name DETAILS" is the section header — require value not equal to "DETAILS"
-    "Business Name":               r"^Business Name\s+(?!DETAILS$)(.+)$",
-    "BN Number":                   r"^BN Number\s+(.+)$",
-    "Date of Registration":        r"^Date of Registration\s+(.+)$",
-    "Business Type":               r"^Business Type\s+(.+)$",
-    "Business Email":              r"^Email\s+(.+)$",
-    # Address wraps: first part is on the line BEFORE the label, second part on line AFTER
-    "Principal Place of Business": r"(.+)\nPrincipal Place of Business\s*\n(.+)",
-    "Principal Business Activity": r"^Principal Business Activity\s+(.+)$",
+# LABELS (normalised to UPPERCASE) -> output column
+BUSINESS_LABELS = {
+    "BUSINESS NAME": "Business Name",
+    "BN NUMBER": "BN Number",
+    "DATE OF REGISTRATION": "Date of Registration",
+    "BUSINESS TYPE": "Business Type",
+    "PRINCIPAL PLACE OF BUSINESS": "Principal Place of Business",
+    "BRANCH ADDRESS": "Branch Address",
+    "POST CODE": "Post Code",
+    "EMAIL": "Business Email",
+    "STATUS": "Business Status",
+    "PRINCIPAL BUSINESS ACTIVITY": "Principal Business Activity",
+    "DUE DATE OF ACCOUNTS": "Due Date of Accounts",
 }
+PROPRIETOR_LABELS = {
+    "ROLE TYPE": "ROLE TYPE",
+    "SURNAME": "SURNAME",
+    "FIRSTNAME": "FIRSTNAME",
+    "OTHER NAME": "OTHER NAME",
+    "EMAIL": "EMAIL",
+    "PHONE NUMBER": "PHONE NUMBER",
+    "NATIONALITY": "NATIONALITY",
+    "SERVICE ADDRESS": "SERVICE ADDRESS",
+    "RESIDENTIAL ADDRESS": "RESIDENTIAL ADDRESS",
+    "GENDER": "GENDER",
+    "DATE OF BIRTH": "DATE OF BIRTH",
+    "STATUS": "STATUS",
+}
+PROPRIETOR_START = "ROLE TYPE"   # the business section ends where this label appears
 
-# LOAD PROCESSED FILES
+COLUMNS = (
+    ["Business Name", "BN Number", "Date of Registration", "Business Type",
+     "Principal Place of Business", "Branch Address", "Post Code", "Business Email",
+     "Business Status", "Principal Business Activity", "Due Date of Accounts"]
+    + ["ROLE TYPE", "SURNAME", "FIRSTNAME", "OTHER NAME", "EMAIL", "PHONE NUMBER",
+       "NATIONALITY", "SERVICE ADDRESS", "RESIDENTIAL ADDRESS", "GENDER",
+       "DATE OF BIRTH", "STATUS"]
+)
+REQUIRED = ["Business Name", "Principal Place of Business", "SURNAME", "FIRSTNAME"]
+
+
+# PROCESSED-FILE TRACKING
 def load_processed_files():
     if os.path.exists(PROCESSED_LOG):
         with open(PROCESSED_LOG, "r") as f:
-            return set(line.strip() for line in f)
+            return set(line.strip() for line in f if line.strip())
     return set()
 
-def save_processed_file(filename):
+
+def save_processed_files(filenames):
     with open(PROCESSED_LOG, "a") as f:
-        f.write(filename + "\n")
+        for name in filenames:
+            f.write(name + "\n")
 
-# EXTRACT TEXT FROM PDF
-def extract_pdf_text(pdf_path):
-    text = ""
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-    except Exception as e:
-        print(f"Error reading {pdf_path}: {e}")
-    return text
-    
-# APPLY REGEX EXTRACTION
-def extract_data(text):
-    extracted = {}
-    for field, pattern in PATTERNS.items():
-        match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
-        if match:
-            # Principal Place of Business has 2 groups (wrapped address)
-            if match.lastindex and match.lastindex >= 2:
-                value = " ".join(g.strip() for g in match.groups() if g)
-            else:
-                value = match.group(1).strip()
+
+# COORDINATE-BASED PARSING
+def group_lines(words):
+    """Cluster words into lines by vertical position. Returns lines top to bottom."""
+    lines = []
+    for w in sorted(words, key=lambda w: (w["top"], w["x0"])):
+        if lines and abs(w["top"] - lines[-1]["top"]) <= LINE_TOL:
+            lines[-1]["words"].append(w)
         else:
-            value = None
-        # Normalise "NIL" to actual None so Excel cells are empty
-        extracted[field] = None if value and value.upper() == "NIL" else value
-    return extracted
+            lines.append({"top": w["top"], "words": [w]})
+    for line in lines:
+        line["words"].sort(key=lambda w: w["x0"])
+        line["y"] = sum((w["top"] + w["bottom"]) / 2 for w in line["words"]) / len(line["words"])
+        line["text"] = " ".join(w["text"] for w in line["words"])
+    return lines
 
-# APPEND TO EXCEL
-def append_to_excel(data):
-    new_df = pd.DataFrame([data])
 
-    if os.path.exists(OUTPUT_FILE):
-        existing_df = pd.read_excel(OUTPUT_FILE)
-        combined_df = pd.concat([existing_df, new_df], ignore_index=True)
-    else:
-        combined_df = new_df
+def normalise_label(text):
+    # drop numbering such as "1. 1. ROLE TYPE"
+    return re.sub(r"^(?:\d+\.\s*)+", "", text).strip().upper()
 
-    combined_df.to_excel(OUTPUT_FILE, index=False)
-    return OUTPUT_FILE
 
-# CHECKS IF STATUS REPORT
-def checker(filename):
-    return "Status Report" in filename
+def clean_value(value):
+    value = re.sub(r"\s+", " ", value).strip()
+    return None if not value or value.upper() == "NIL" else value
 
-# PROCESS PDF
+
+def extract_fields(pdf_path):
+    fields = {}
+    in_proprietor = False
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            split_x = page.width * SPLIT_RATIO
+            left = [w for w in words if w["x0"] < split_x]
+            right = [w for w in words if w["x0"] >= split_x]
+
+            # 1) find label anchors in the left column, in reading order
+            anchors = []
+            for line in group_lines(left):
+                key = normalise_label(line["text"])
+                if key == PROPRIETOR_START:
+                    in_proprietor = True
+                table = PROPRIETOR_LABELS if in_proprietor else BUSINESS_LABELS
+                if key in table:
+                    anchors.append({"column": table[key], "y": line["y"], "words": []})
+
+            if not anchors:
+                continue
+
+            # 2) give each right-column word to the vertically nearest label
+            for w in right:
+                wy = (w["top"] + w["bottom"]) / 2
+                nearest = min(anchors, key=lambda a: abs(a["y"] - wy))
+                if abs(nearest["y"] - wy) <= MAX_DIST:
+                    nearest["words"].append(w)
+
+            # 3) build values (multi-line values are joined top to bottom)
+            for a in anchors:
+                value = " ".join(line["text"] for line in group_lines(a["words"]))
+                if a["column"] == "Principal Business Activity":
+                    value = re.sub(r"^\d+\.\s*", "", value)   # "1. FASHION DESIGNING"
+                fields.setdefault(a["column"], clean_value(value))  # first occurrence wins
+
+    return fields
+
+
+# PROCESS PDFs
+def is_status_report(filename):
+    return "STATUS REPORT" in filename.upper().replace("_", " ")
+
+
 def process_pdf(pdf_path):
     filename = os.path.basename(pdf_path)
+    try:
+        data = extract_fields(pdf_path)
+    except Exception as e:
+        print(f"Error reading {filename}: {e}")
+        return None
 
-    processed_files = load_processed_files()
-    if filename in processed_files:
-        print(f"Skipping already processed: {filename}")
-        return
+    if not data:
+        print(f"No fields found in {filename}")
+        return None
 
-    if not checker(filename):
-        print(f"Skipping Certificate: {filename}")
-        return
+    missing = [c for c in REQUIRED if not data.get(c)]
+    if missing:
+        print(f"  WARNING {filename}: missing {', '.join(missing)}")
 
-    print(f"Processing: {filename}")
+    row = {c: data.get(c) for c in COLUMNS}
+    row["Source File"] = filename
+    row["Check"] = ("MISSING: " + ", ".join(missing)) if missing else ""
+    return row
 
-    text = extract_pdf_text(pdf_path)
-    if not text.strip():
-        print(f"No text found in {filename}")
-        return
 
-    data = extract_data(text)
-    data["Source File"] = filename
-
-    file_name = append_to_excel(data)
-    save_processed_file(filename)
-
-    print(f"Done: {filename}")
-    return file_name
-
-# INITIAL BACKLOG PROCESSING
 def process_existing_pdfs():
-    tracker = 0
-    output_file = None
-    for file in os.listdir(PDF_FOLDER):
-        if file.lower().endswith(".pdf"):
-            result = process_pdf(os.path.join(PDF_FOLDER, file))
-            if result:
-                tracker += 1
-                output_file = result  # keep updating — all writes go to same file
-    print(f"Total Processed: {tracker}")
-    return output_file
+    processed = load_processed_files()
+    rows, done = [], []
 
-def data_processing(file):
-    print(file)
-    OUTPUT_FILE = file
+    for file in sorted(os.listdir(PDF_FOLDER)):
+        if not file.lower().endswith(".pdf"):
+            continue
+        if file in processed:
+            print(f"Skipping already processed: {file}")
+            continue
+        if not is_status_report(file):
+            print(f"Skipping Certificate: {file}")
+            continue
 
-    if os.path.exists(OUTPUT_FILE):
-        data = pd.read_excel(OUTPUT_FILE)
+        print(f"Processing: {file}")
+        row = process_pdf(os.path.join(PDF_FOLDER, file))
+        if row:
+            rows.append(row)
+            done.append(file)
 
-        # Clean common extraction issues
-        if 'OTHER NAME' in data.columns:
-            data['OTHER NAME'] = (
-                data['OTHER NAME']
-                .fillna('')
-                .replace(r'EMAIL\s+NIL', '', regex=True)
-                .str.strip()
-            )
+    if not rows:
+        return None
 
-        # Save cleaned file
-        data.to_excel(OUTPUT_FILE, index=False)
+    # write once, then mark files processed (so a crash doesn't lose rows)
+    pd.DataFrame(rows, columns=COLUMNS + ["Source File", "Check"]).to_excel(OUTPUT_FILE, index=False)
+    save_processed_files(done)
+    print(f"Total Processed: {len(rows)}")
+    return OUTPUT_FILE
 
-        print("Data cleaned successfully.")
-
-    else:
-        print("An Error Occurred During Data Processing")
 
 if __name__ == "__main__":
     start = time.time()
     os.makedirs(PDF_FOLDER, exist_ok=True)
 
     print("Checking existing PDFs...")
-    file = process_existing_pdfs()
-    if file:
-        data_processing(file)
+    out = process_existing_pdfs()
+    if out:
+        print(f"Saved: {out}")
     else:
-        print("No Status Reports were processed — skipping data cleaning.")
-    end = time.time()
-    print(f"Process Completed. Time Taken: {end - start:.2f} seconds")
+        print("No Status Reports were processed.")
+    print(f"Process Completed. Time Taken: {time.time() - start:.2f} seconds")
